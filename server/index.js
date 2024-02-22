@@ -1,76 +1,77 @@
 import express from 'express'
 import logger from 'morgan'
+import dotenv from 'dotenv'
+import { createClient } from '@libsql/client'
 
 import { Server } from 'socket.io'
 import { createServer } from 'node:http'
-
-import mysql from 'mysql2/promise'
-
-const DEFAULT_CONFIG = {
-  host: 'localhost',
-  user: 'root',
-  port: 3306,
-  password: '',
-  database: 'chat_db'
-}
-
-const connectionString = process.env.DATABASE_URL ?? DEFAULT_CONFIG
-
-const connection = await mysql.createConnection(connectionString)
+import 'dotenv/config'
 
 const port = process.env.PORT ?? 3000
 
 const app = express()
 const server = createServer(app)
 const io = new Server(server, {
-    connectionStateRecovery: {}
+  connectionStateRecovery: {}
 })
 
+const db = createClient({
+    url: 'libsql://chatdb-miguelgallardobyinfinitum.turso.io',
+    authToken: process.env.DB_TOKEN
+})
+
+await db.execute(`
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content TEXT,
+        username TEXT
+    )
+`)
+
 io.on('connection', async (socket) => {
-    console.log('A user has connected')
-
-    socket.on('disconnect', () => {
-        console.log('A user has disconnected')
-    })
-
-    socket.on('chat message', async (msg) => {
-        let result
-        let username = socket.handshake.auth.username ?? 'anonymous'
-        try {
-            await connection.query(
-                `INSERT INTO messages (content, user) VALUES (?, ?);`, [msg, username]
-            )
-            result = await connection.query(
-                `SELECT LAST_INSERT_ID();`
-            )
-        } catch (e) {
-            console.error(e)
-            return
-        }
-        io.emit('chat message', msg, result[0], username)
-    })
-
-    if(!socket.recovered) { 
-        try {
-            const [messages] = await connection.query(
-                `SELECT id, content, user FROM messages WHERE id > ?;`, [socket.handshake.auth.serverOffset ?? 0]
-            )
-
-            messages.forEach(element => {
-                socket.emit('chat message', element.content, element.id.toString(), element.user)
-            });
-        } catch (e) {
-            console.error(e)
-        }
+  console.log('A user has connected')
+  socket.on('disconnect', () => {
+    console.log('A user has disconnected')
+  })
+  socket.on('chat message', async (msg) => {
+    let result
+    let username = socket.handshake.auth.username ?? 'anonymous'
+    try {
+      result = await db.execute({
+        sql: `INSERT INTO messages (content, username) VALUES (:msg, :username)`,
+        args: { msg, username }
+      })
+    } catch (err) {
+      console.error(err)
+      return 
     }
+
+    io.emit('chat message', msg, result.lastInsertRowid.toString(), username)
+  })
+
+  if(!socket.recovered){
+    try {
+      const results = await db.execute({
+        sql: `SELECT id, content, username FROM messages WHERE id > ?`,
+        args: [socket.handshake.auth.serverOffset ?? 0]
+      })
+
+      results.rows.forEach(row => {
+        socket.emit('chat message', row.content, row.id.toString(), row.username)
+      })
+    } catch (e) {
+        console.error(e)
+    }
+  }
 })
 
 app.use(logger('dev'))
 
 app.get('/', (req, res) => {
-    res.sendFile(process.cwd() + '/client/index.html')
+  res.sendFile(process.cwd() + '/client/index.html')
 })
 
 server.listen(port, () => {
-    console.log(`Server running on port ${port}`)
+  console.clear()
+  console.log(`Server active on port ${port}`)
 })
